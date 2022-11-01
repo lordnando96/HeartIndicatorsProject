@@ -1,0 +1,200 @@
+https://app.snowflake.com/us-east-2.aws/fo52951/w17m1wblk2a2/query
+
+/* Step 3: Create an External Stage to load the data continuously */
+
+--Create Integration
+create or replace storage integration s3_int
+type=external_stage
+storage_provider=s3
+enabled=true
+storage_aws_role_arn='arn:aws:iam::627741535532:role/skonda96_role'
+storage_allowed_locations=('s3://skonda96/')
+desc integration s3_int;
+
+
+--Create File Format
+create or replace file format my_csv_format
+  type = csv
+  field_delimiter = '|'
+  skip_header = 1
+  null_if = ('NULL', 'null')
+  empty_field_as_null = true 
+  
+--Create Stage
+use schema heart_disease_indicators.public;
+
+create or replace stage aws_ext_stage
+storage_integration = s3_int
+url='s3://skonda96/heart_2020_cleaned.csv'
+file_format=my_csv_format;
+
+show stages;
+
+--Create Table
+create or replace table hdmetrics
+(HeartDisease string, 
+ BMI number,
+ Smoking string, 
+ AlcoholDrinking string, 
+ Stroke string, 
+ PhysicalHealth number, 
+ MentalHealth number, 
+ DiffWalking string, 
+ Sex string, 
+ AgeCategory varchar, 
+ Race string, 
+ Diabetic string, 
+ PhysicalActivity string, 
+ GenHealth string, 
+ SleepTime number, 
+ Asthma string, 
+ KidneyDisease string, 
+ SkinCancer string
+ update_timestamp timestamp_ntz);
+
+ 
+ --Create Row Access Security
+ create or replace row access policy rap_t1 as (HeartDisease varchar, BMI number, Smoking varchar, AlcoholDrinking varchar, Stroke varchar, PhysicalHealth number, MentalHealth number, DiffWalking varchar, SEX varchar, AGECATEGORY varchar, RACE varchar, DIABETIC varchar, PHYSICALACTIVITY varchar, GENHEALTH varchar, SLEEPTIME number, ASTHMA varchar, KIDNEYDISEASE varchar, SKINCANCER varchar) returns boolean ->
+  case
+      when 'it_admin' = current_role() then true
+      else false
+  end;
+
+alter table hdmetrics add row access policy rap_t1 on (HeartDisease, BMI, Smoking, AlcoholDrinking, Stroke, PhysicalHealth, MentalHealth, DiffWalking, SEX, AGECATEGORY, RACE, DIABETIC, PHYSICALACTIVITY, GENHEALTH, SLEEPTIME, ASTHMA, KIDNEYDISEASE, SKINCANCER);
+  
+--Create Snowpipe
+create or replace pipe heart_disease_indicators.public.pipe 
+  auto_ingest=true 
+  as
+  copy into hdmetrics
+  from @aws_ext_stage
+  file_format = my_csv_format
+  on_error = 'continue';
+
+select system$pipe_status('pipe');
+
+--Create Task
+create or replace TASK t1
+  schedule = 'USING CRON 0 0 * * THU America/New_York'
+  user_task_managed_initial_warehouse_size = 'XSMALL'
+AS
+SELECT CURRENT_TIMESTAMP;
+
+--Create SCD2 on database
+
+create or replace TABLE HDMETRICS_HISTORY (
+	HEARTDISEASE VARCHAR(16777216),
+	BMI NUMBER(38,0),
+	SMOKING VARCHAR(16777216),
+	ALCOHOLDRINKING VARCHAR(16777216),
+	STROKE VARCHAR(16777216),
+	PHYSICALHEALTH NUMBER(38,0),
+	MENTALHEALTH NUMBER(38,0),
+	DIFFWALKING VARCHAR(16777216),
+	SEX VARCHAR(16777216),
+	AGECATEGORY VARCHAR(16777216),
+	RACE VARCHAR(16777216),
+	DIABETIC VARCHAR(16777216),
+	PHYSICALACTIVITY VARCHAR(16777216),
+	GENHEALTH VARCHAR(16777216),
+	SLEEPTIME NUMBER(38,0),
+	ASTHMA VARCHAR(16777216),
+	KIDNEYDISEASE VARCHAR(16777216),
+	SKINCANCER VARCHAR(16777216)
+    start_time timestamp_ntz,
+    end_time timestamp_ntz,
+    current_flag int);
+    
+create or replace stream hdmetrics_history on table nation;
+
+MERGE into hdmetricshistory as h
+USING hdmetrics AS d
+on t."ID"=s."ID"
+ and (metadata$action='DELETE')
+when matched and metadata$isupdate='FALSE' then update set rec_version=9999, stream_type='DELETE'
+when matched and metadata$isupdate='TRUE' then update set rec_version=rec_version-1
+when not matched then insert (HeartDisease, BMI, Smoking, AlcoholDrinking, Stroke, PhysicalHealth, MentalHealth, DiffWalking, Sex, AgeCategory, Race, Diabetic, PhysicalActivity, GenHealth, SleepTime, Asthma, KidneyDisease, SkinCancer, id,stream_type, rec_version, REC_DATE) 
+
+values(d.HeartDisease, d.BMI ,d.Smoking ,d.AlcoholDrinking ,d.Stroke ,d.PhysicalHealth ,d.MentalHealth ,d.DiffWalking ,d.Sex ,d.AgeCategory ,d.Race ,d.Diabetic, d.PhysicalActivity, d.GenHealth, d.SleepTime, d.Asthma, d.KidneyDisease, d.SkinCancer, d.id, metadata$action,0,CURRENT_TIMESTAMP() );
+
+------------------------------------------------------ 
+1. Which gender is more likely to have heart attack? - Female
+SELECT COUNT(HEARTDISEASE) as more_likely_to_have_heart_attack
+FROM hdmetrics
+WHERE SEX = 'Female'
+GROUP BY SEX;
+
+SELECT COUNT(HEARTDISEASE) as less_likely_to_have_heart_attack
+FROM hdmetrics
+WHERE SEX = 'Male'
+GROUP BY SEX;
+
+2. Average Age at which people generally gets heart attack - 75 - 79
+SELECT AVG(AGECATEGORY)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes'
+ORDER BY AgeCategory DESC;
+
+3. which combination of physical and mental health causes stroke
+SELECT PhysicalHealth, MentalHealth
+CASE(
+    WHEN PHYSICALHEALTH > 30 THEN 'The quantity is greater than 30'
+    WHEN MENTALHEALTH > 30 THEN 'The quantity is 30'
+    ELSE 'The quantity is under 30'
+END);
+WHERE Stroke = 'Yes';
+FROM hdmetrics
+
+4. GenHealth wise average BMI of people
+SELECT AVG(BMI), GENHEALTH
+FROM hdmetrics
+GROUP BY GenHealth;
+
+5. Average age of people having problem in walking - 40-44
+SELECT AGECATEGORY
+FROM hdmetrics
+WHERE DIFFWALKING = 'Yes'
+GROUP BY AGECATEGORY
+ORDER BY AGECATEGORY DESC;
+
+6. Count the different combination of people having heart-attack against BMI, Smoking ,  
+AlcoholDrinking,Stroke,Diabetic,Kidney Diseases,SkinCancer 
+SELECT COUNT(BMI)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+SELECT COUNT(SMOKING)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+SELECT COUNT(ALCOHOLDRINKING)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+SELECT COUNT(STROKE)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+SELECT COUNT(DIABETIC)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+SELECT COUNT(KIDNEYDISEASE)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+SELECT COUNT(SKINCANCER)
+FROM hdmetrics
+WHERE HeartDisease = 'Yes';
+
+7. Average BMI of people having Skin Cancer
+SELECT AVG(BMI)
+FROM hdmetrics
+WHERE SKINCANCER = 'Yes'
+
+8. Possibilities/Percentage of people having both Heart Diseases, stroke and Skin Cancer 
+SELECT HeartDisease, Stroke SkinCancer
+FROM hdmetrics;
+
+Step 8(Optional): Please try to implement row level security on your dataset. 
+Step 9: Create a github link and push the codes in that.
